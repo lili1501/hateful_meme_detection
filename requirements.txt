@@ -1,0 +1,6 @@
+# Torch-free part: data, scoring, metrics, report, serve client, tests (installed and tested in the build sandbox)
+numpy==2.5.4
+pillow==12.3.0
+httpx==0.28.1
+pytest==9.1.1
+scikit-learn==1.9.1

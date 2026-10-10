@@ -1,0 +1,4 @@
+# Inference env (GPU). vLLM pins its own torch, so keep it in a SEPARATE virtualenv from training. Unpinned, untested here.
+-r requirements.txt
+vllm
+transformers
