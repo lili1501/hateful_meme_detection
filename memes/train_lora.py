@@ -17,6 +17,7 @@ import time
 
 import numpy as np
 
+from memes.early_stop import EarlyStopper
 from memes.data import load_memes, stratified_split, write_jsonl
 from memes.hf_common import DEFAULT_MODEL, load_processor, open_image, prompt_text
 from memes.labels import mask_prompt_labels
@@ -62,6 +63,9 @@ def main():
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--end-token", default="<end_of_utterance>", help="end-of-turn marker in the chat template")
     ap.add_argument("--max-train-rows", type=int, default=None, help="debug: use only N rows")
+    ap.add_argument("--patience", type=int, default=3, help="stop after this many epochs without a validation AUROC "
+                    "improvement (0 = never stop early). The saved adapter is always the best epoch, not the last.")
+    ap.add_argument("--min-delta", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
 
@@ -94,6 +98,7 @@ def main():
 
     from memes.predict_hf import score_rows
     log, t0, step = [], time.time(), 0
+    stopper, best_scores = EarlyStopper(a.patience, a.min_delta), None
     for epoch in range(a.epochs):
         model.train()
         for i, batch in enumerate(loader):
@@ -109,15 +114,22 @@ def main():
                     print(log[-1], flush=True)
         scores = score_rows(model, processor, val_rows)
         val_auc = auroc(np.array([r["label"] for r in val_rows]), scores)
-        log.append({"epoch_end": epoch, "val_auroc": val_auc})
-        print(f"epoch {epoch}: val AUROC {val_auc:.4f}", flush=True)
+        improved, stop = stopper.update(val_auc)
+        log.append({"epoch_end": epoch, "val_auroc": val_auc, "best_so_far": improved})
+        print(f"epoch {epoch}: val AUROC {val_auc:.4f}{'  (new best, saving adapter)' if improved else ''}", flush=True)
+        if improved:
+            best_scores = scores
+            model.save_pretrained(os.path.join(a.out, "adapter"))
+            processor.save_pretrained(os.path.join(a.out, "adapter"))
+        if stop:
+            print(f"early stop: no improvement for {a.patience} epochs; best epoch {stopper.best_epoch}", flush=True)
+            break
 
-    write_jsonl([{"id": r["id"], "label": r["label"], "score": float(x)} for r, x in zip(val_rows, scores)],
+    write_jsonl([{"id": r["id"], "label": r["label"], "score": float(x)} for r, x in zip(val_rows, best_scores)],
                 os.path.join(a.out, "val_pred.jsonl"))
-    model.save_pretrained(os.path.join(a.out, "adapter"))
-    processor.save_pretrained(os.path.join(a.out, "adapter"))
     json.dump({"args": vars(a), "log": log, "train_seconds": round(time.time() - t0, 1),
-               "n_train": len(train_rows), "n_val": len(val_rows)}, open(os.path.join(a.out, "train_log.json"), "w"), indent=2)
+               "n_train": len(train_rows), "n_val": len(val_rows),
+               "best_epoch": stopper.best_epoch, "best_val_auroc": stopper.best, "epochs_run": stopper.epoch + 1}, open(os.path.join(a.out, "train_log.json"), "w"), indent=2)
 
 
 if __name__ == "__main__":

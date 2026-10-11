@@ -239,3 +239,30 @@ def test_filter_ids(fake):
     write_jsonl([{"id": 999999}], path)
     with pytest.raises(ValueError):
         filter_ids(rows, path)
+
+
+# ---- early stopping -----------------------------------------------------------------------------
+def test_early_stopper_tracks_best_and_stops_after_patience():
+    from memes.early_stop import EarlyStopper
+    es = EarlyStopper(patience=2)
+    assert es.update(0.60) == (True, False)
+    assert es.update(0.65) == (True, False)
+    assert es.update(0.64) == (False, False)                 # 1 bad epoch
+    assert es.update(0.66) == (True, False)                  # improvement resets the counter
+    assert es.update(0.60) == (False, False)
+    assert es.update(0.61) == (False, True)                  # 2 bad epochs in a row
+    assert es.best == 0.66 and es.best_epoch == 3
+
+
+def test_early_stopper_min_delta_nan_and_disabled():
+    from memes.early_stop import EarlyStopper
+    es = EarlyStopper(patience=1, min_delta=0.01)
+    es.update(0.70)
+    assert es.update(0.705) == (False, True)                 # +0.005 is below min_delta
+    es = EarlyStopper(patience=1)
+    es.update(0.7)
+    assert es.update(float("nan")) == (False, True) and es.best == 0.7
+    es = EarlyStopper(patience=0)
+    for v in (0.5, 0.4, 0.3, 0.2):
+        stop = es.update(v)[1]
+    assert not stop and es.best_epoch == 0                    # patience 0: never stops, still tracks the best
