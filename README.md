@@ -10,10 +10,9 @@ open model, chosen because Qwen is not usable on the target cluster. Any other V
 LoRA target modules are given (`--model`, `--target-regex`, `--end-token`); Llama 3.2 Vision, PaliGemma and Pixtral are
 alternatives but are gated or larger. Only the default has been considered in detail, and none were run.
 
-> **Status.** The model-free parts are tested here (27 tests). **Nothing that loads a model has been run**: the build
-> sandbox has no GPU, no PyTorch CUDA libraries and no access to Hugging Face. So this repo contains **no accuracy or AUROC
-> results**, and `train_lora.py`, `predict_hf.py`, `predict_vllm.py`, `merge_lora.py` and the sbatch scripts are
-> untested against the real libraries. Expect small API fixes on the first GPU run.
+> **Status.** Run end to end once on a B200 (one training run, one seed): zero-shot scoring, LoRA fine-tuning (2 epochs),
+> merge, and vLLM scoring all worked. Results and caveats are in the Results section. The sbatch scripts were not used (the
+> run used `scripts/run_eval_local.sh` in an interactive session), so they remain untested.
 
 ## Pipeline
 
@@ -59,9 +58,42 @@ neither Yes nor No was in the top-20 tokens (should be ~0). Optional serving che
 
 Run the torch-free tests anywhere: `pip install -r requirements.txt && python -m pytest tests -q`.
 
+## Results (one run, SmolVLM-Instruct + LoRA, B200)
+Data: a third-party Hugging Face mirror of the Hateful Memes data (see Data below), **not** the official download.
+That mirror lacks about 20% of the images, so the evaluation set is **398 of the 500 `dev_seen` memes** (102 dropped) and
+training used 6,744 of the 8,500 `train` memes, split 90/10 into training and validation. The dropped rows have almost the
+same hateful rate as the kept ones (train 0.356 vs 0.355, dev 0.480 vs 0.497), but only the label was checked.
+These numbers are **not comparable to published `dev_seen` results**.
+
+| Run | n | AUROC (95% bootstrap CI) | Accuracy @ 0.5 |
+|---|---|---|---|
+| zero-shot SmolVLM | 398 | 0.596 (0.545 - 0.651) | 0.540 |
+| + LoRA (2 epochs) | 398 | 0.781 (0.730 - 0.824) | 0.706 |
+
+Paired AUROC difference, LoRA minus zero-shot: **+0.185** (95% CI +0.130 to +0.234).
+
+- AUROC is the headline: it needs no threshold. Accuracy at a validation-tuned threshold was *lower* (0.663 at threshold
+  0.622) than at 0.5, because the validation split comes from `train` (35.5% hateful) and `dev_seen` is 49.7% hateful, so
+  a threshold tuned on one balance does not carry over. It is reported in `reports/results.md` but not used as a result.
+- One training run with one seed and untuned hyperparameters (rank 16, lr 2e-4, 2 epochs, 384-px images). No variance
+  across seeds, so the size of the gain is an estimate. The CI covers resampling of the 398 dev memes only.
+- The text of each meme is given to the model, so it is not a pure image task.
+- I believe SmolVLM's pre-training data (The Cauldron) includes Hateful Memes training images; this is unverified. The
+  zero-shot score on `dev_seen` (0.596) shows no sign of memorisation there, but the fine-tuned gain should still be read as
+  "relative to this zero-shot baseline", not as an absolute capability claim.
+- Early stopping on validation AUROC with best-epoch saving was added after the first run; this run used 2 epochs, where
+  it cannot trigger.
+
+## Data
+Not included. The licence (`LICENSE.txt` in the dataset) restricts redistribution and use to a stated research purpose and
+requires accepting it to access the data; the copy used here came from a third-party mirror
+(`neuralcatcher/hateful_memes`), not from Facebook's own download, so check the licence terms for your own use.
+`data/` and any prediction file containing meme text must stay out of git. Cite Kiela et al., "The Hateful Memes Challenge",
+NeurIPS 2020. If some images are missing, `HM_DROP_MISSING=1` drops those rows and prints how many (and the label rates).
+
 ## Verified vs not verified
 
-**Verified by running it:**
+**Verified by running it (30 tests, plus one real GPU run: loading, LoRA training, merging, vLLM scoring of base and merged models, report):**
 - AUROC equals scikit-learn on random data including heavy ties; known values; threshold search; bootstrap CI.
 - Yes/No scoring: variants pooled, symmetric under swapping classes, no overflow at extreme logits, missing-token cases.
 - Loss masking on right-padded batches, including error cases (prompt swallowing the answer, left padding).
@@ -71,15 +103,13 @@ Run the torch-free tests anywhere: `pip install -r requirements.txt && python -m
 - Deliberately breaking the masking, scoring sign and AUROC tie handling each made tests fail.
 
 **Not verified:**
-- Everything that needs the model stack: model/processor loading, LoRA target regex matching the right layers, the
-  `size`/`do_image_splitting` processor settings, prompt-length computation with expanded image tokens, bf16 memory, the
-  `<end_of_utterance>` end-of-turn marker, merging, and vLLM loading of the merged checkpoint with those processor settings.
-- Any accuracy, AUROC, speed, or latency figure. None exist yet.
+- Multiple seeds, hyperparameter sensitivity, and group-level error rates (see Notes).
 - The sbatch scripts (partition names, modules, whether compute nodes are offline).
-- Real Hateful Memes data (only fake memes in the same file format were used).
+- The early-stopping branch on a GPU run longer than 2 epochs (unit-tested only).
 
 ## Notes and limits
 - Hyperparameters (rank 16, lr 2e-4, 2 epochs, 384-px images) are untuned defaults.
+- Latency figures from `predict_vllm` time the first token only (prefill), one request at a time.
 - The text of each meme is given to the model in the prompt (the dataset provides it); the model must still use the image
   to catch the "benign confounder" pairs the dataset is built around.
 - Hateful-content classifiers can encode bias against identity groups; evaluate error rates by group before any real use.
