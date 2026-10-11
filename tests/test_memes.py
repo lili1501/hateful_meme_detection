@@ -136,6 +136,24 @@ def test_load_memes_and_split(fake):
     assert [r["id"] for r in stratified_split(rows, 0.1, seed=4)[1]] != [r["id"] for r in va]
 
 
+def test_load_memes_drop_missing_keeps_present_rows_and_reports(tmp_path, capsys, monkeypatch):
+    img = tmp_path / "img"; img.mkdir()
+    rows = []
+    for i in range(10):
+        if i % 2 == 0:
+            Image.new("RGB", (4, 4)).save(img / f"{i}.png")
+        rows.append({"id": i, "img": f"img/{i}.png", "label": int(i < 3), "text": "t"})
+    p = str(tmp_path / "x.jsonl"); write_jsonl(rows, p)
+    with pytest.raises(FileNotFoundError):
+        load_memes(p)                                                       # default stays strict
+    kept = load_memes(p, drop_missing=True)
+    assert [r["id"] for r in kept] == [0, 2, 4, 6, 8]
+    err = capsys.readouterr().err
+    assert "dropped 5 of 10" in err and "kept 0.400 vs dropped 0.200" in err   # hateful ids 0,1,2: kept 0,2 (2/5); dropped 1 (1/5)
+    monkeypatch.setenv("HM_DROP_MISSING", "1")
+    assert len(load_memes(p)) == 5                                          # env var switch
+
+
 def test_load_memes_rejects_bad_input(tmp_path):
     img = tmp_path / "img"; img.mkdir(); Image.new("RGB", (4, 4)).save(img / "1.png")
     def check(rows, exc):

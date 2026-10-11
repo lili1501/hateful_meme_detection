@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 import numpy as np
 
@@ -24,11 +25,18 @@ def write_jsonl(rows: list[dict], path: str) -> None:
             f.write(json.dumps(r) + "\n")
 
 
-def load_memes(jsonl_path: str, image_root: str | None = None, check_images: bool = True) -> list[dict]:
-    """Rows with absolute `path`. image_root defaults to the folder holding the jsonl (img/ lives next to it)."""
+def load_memes(jsonl_path: str, image_root: str | None = None, check_images: bool = True,
+               drop_missing: bool | None = None) -> list[dict]:
+    """Rows with absolute `path`. image_root defaults to the folder holding the jsonl (img/ lives next to it).
+
+    drop_missing: by default a row whose image file is absent raises FileNotFoundError. With drop_missing=True (or the
+    environment variable HM_DROP_MISSING=1) such rows are removed instead, and a one-line audit (rows kept/dropped and
+    the hateful rate of each) goes to stderr, so a mirror with missing images cannot silently change the data."""
+    if drop_missing is None:
+        drop_missing = os.environ.get("HM_DROP_MISSING", "") == "1"
     root = image_root or os.path.dirname(os.path.abspath(jsonl_path))
     rows = read_jsonl(jsonl_path)
-    out, seen = [], set()
+    out, dropped, seen = [], [], set()
     for r in rows:
         for key in ("id", "img", "text", "label"):
             if key not in r:
@@ -40,9 +48,18 @@ def load_memes(jsonl_path: str, image_root: str | None = None, check_images: boo
             raise ValueError(f"{jsonl_path}: duplicate id {r['id']}")
         seen.add(r["id"])
         path = os.path.join(root, r["img"])
+        row = {"id": r["id"], "path": path, "text": r["text"].strip(), "label": int(r["label"])}
         if check_images and not os.path.exists(path):
-            raise FileNotFoundError(path)
-        out.append({"id": r["id"], "path": path, "text": r["text"].strip(), "label": int(r["label"])})
+            if not drop_missing:
+                raise FileNotFoundError(path)
+            dropped.append(row)
+            continue
+        out.append(row)
+    if dropped:
+        def rate(rs):
+            return sum(x["label"] for x in rs) / len(rs) if rs else float("nan")
+        print(f"[data] {os.path.basename(jsonl_path)}: dropped {len(dropped)} of {len(rows)} rows with no image file; "
+              f"hateful rate kept {rate(out):.3f} vs dropped {rate(dropped):.3f}", file=sys.stderr)
     return out
 
 
